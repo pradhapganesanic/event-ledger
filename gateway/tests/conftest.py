@@ -11,14 +11,26 @@ import json
 import httpx
 import pytest
 from fastapi.testclient import TestClient
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from app import account_client
+from app import account_client, otel
 from app.database import Base, get_db
 from app.main import app
 from app.tracing import TRACE_HEADER
+
+# Capture OTel spans in memory (no Collector/Jaeger needed for tests).
+_memory_exporter = InMemorySpanExporter()
+otel.provider.add_span_processor(SimpleSpanProcessor(_memory_exporter))
+
+
+@pytest.fixture
+def spans() -> InMemorySpanExporter:
+    _memory_exporter.clear()
+    return _memory_exporter
 
 
 class FakeAccount:
@@ -27,6 +39,7 @@ class FakeAccount:
     def __init__(self):
         self.transactions = {}  # event_id -> {accountId, type, amount, ...}
         self.last_trace_id = None
+        self.last_traceparent = None
         self.down = False
         self.calls = 0  # number of times the service was actually contacted
         self.transport = httpx.MockTransport(self._handle)
@@ -34,6 +47,7 @@ class FakeAccount:
     def _handle(self, request: httpx.Request) -> httpx.Response:
         self.calls += 1
         self.last_trace_id = request.headers.get(TRACE_HEADER)
+        self.last_traceparent = request.headers.get("traceparent")
         if self.down:
             raise httpx.ConnectError("account service unavailable")
 

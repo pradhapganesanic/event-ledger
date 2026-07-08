@@ -18,7 +18,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from . import metrics
+from . import metrics, otel
 from .database import get_db, init_db
 from .logging_config import SERVICE_NAME, configure_logging
 from .models import Transaction
@@ -37,6 +37,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Account Service", lifespan=lifespan)
+otel.setup_tracing(app)
 metrics.install(app)
 
 

@@ -1,12 +1,26 @@
 """Test fixtures: give each test a fresh, isolated in-memory database."""
 import pytest
 from fastapi.testclient import TestClient
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from app import otel
 from app.database import Base, get_db
 from app.main import app
+
+# Capture OTel spans in memory (no Collector/Jaeger needed for tests). Attached
+# once to the provider set up at import; the `spans` fixture clears per test.
+_memory_exporter = InMemorySpanExporter()
+otel.provider.add_span_processor(SimpleSpanProcessor(_memory_exporter))
+
+
+@pytest.fixture
+def spans() -> InMemorySpanExporter:
+    _memory_exporter.clear()
+    return _memory_exporter
 
 
 @pytest.fixture

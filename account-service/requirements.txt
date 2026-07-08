@@ -2,3 +2,6 @@ fastapi==0.139.0
 uvicorn[standard]
 sqlalchemy==2.0.51
 prometheus-client==0.25.0
+opentelemetry-sdk==1.43.0
+opentelemetry-exporter-otlp-proto-grpc==1.43.0
+opentelemetry-instrumentation-fastapi==0.64b0
