@@ -97,9 +97,21 @@ across a service boundary each service must be self-sufficient.
 
 ## Run — Docker Compose (preferred)
 
+One click — build, start, wait for health, and run a smoke test:
+
+```bash
+make run        # or: ./run.sh
+```
+
+Or start it yourself:
+
 ```bash
 docker compose up --build
 ```
+
+Handy targets: `make up` (start detached), `make smoke` (smoke test a running
+stack), `make logs`, `make down` (stop + remove volumes), `make test` (all test
+suites, no Docker needed). Run `make help` to list them.
 
 - Gateway → http://localhost:8000  (docs at `/docs`)
 - Account Service — **internal only** under compose (not published to the host);
