@@ -86,11 +86,3 @@ def test_health_reports_db_connected(client):
     assert body["status"] == "ok"
     assert body["service"] == "account-service"
     assert body["database"] == "connected"
-
-
-def test_metrics_exposes_request_counts(client):
-    client.post("/accounts/acct-1/transactions", json=_txn("e1", "CREDIT", 10))
-    r = client.get("/metrics")
-    assert r.status_code == 200
-    assert r.json()["service"] == "account-service"
-    assert any("transactions" in k for k in r.json()["requestsByEndpoint"])

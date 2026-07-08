@@ -5,7 +5,6 @@ Endpoints:
   GET  /accounts/{accountId}/balance       current balance
   GET  /accounts/{accountId}               details + recent transactions
   GET  /health                             status + DB connectivity
-  GET  /metrics                            per-endpoint counters
 
 Balance = sum(CREDIT) - sum(DEBIT), computed from applied transactions, so it
 is correct regardless of the order in which transactions arrive.
@@ -18,7 +17,6 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from . import metrics
 from .database import get_db, init_db
 from .logging_config import SERVICE_NAME, configure_logging
 from .models import Transaction
@@ -36,7 +34,6 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Account Service", lifespan=lifespan)
-metrics.install(app, SERVICE_NAME)
 
 
 def _balance_for(db: Session, account_id: str) -> float:
@@ -73,8 +70,8 @@ def apply_transaction(
     if existing is not None:
         response.status_code = 200
         log.info(
-            "duplicate transaction ignored",
-            extra={"extra_fields": {"eventId": body.eventId, "accountId": account_id}},
+            "transaction duplicate ignored",
+            extra={"extra_fields": {"outcome": "duplicate", "eventId": body.eventId, "accountId": account_id}},
         )
         return existing.to_dict()
 
@@ -99,7 +96,7 @@ def apply_transaction(
     db.refresh(txn)
     log.info(
         "transaction applied",
-        extra={"extra_fields": {"eventId": txn.event_id, "accountId": account_id, "type": txn.type, "amount": float(txn.amount)}},
+        extra={"extra_fields": {"outcome": "applied", "eventId": txn.event_id, "accountId": account_id, "type": txn.type, "amount": float(txn.amount)}},
     )
     return txn.to_dict()
 

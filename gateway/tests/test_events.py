@@ -94,10 +94,3 @@ def test_health_reports_db_connected(client):
     assert body["status"] == "ok"
     assert body["service"] == "event-gateway"
     assert body["database"] == "connected"
-
-
-def test_metrics_exposes_request_counts(client):
-    client.post("/events", json=_event("e", "acct-1", "CREDIT", 10))
-    r = client.get("/metrics")
-    assert r.json()["service"] == "event-gateway"
-    assert any("/events" in k for k in r.json()["requestsByEndpoint"])

@@ -44,7 +44,6 @@ across a service boundary each service must be self-sufficient.
 | `GET` | `/events/{id}` | Retrieve a single event |
 | `GET` | `/events?account={id}` | List an account's events, ordered by `eventTimestamp` |
 | `GET` | `/health` | Health + DB connectivity |
-| `GET` | `/metrics` | Per-endpoint request/error counts |
 
 **Account Service (internal)**
 
@@ -54,7 +53,6 @@ across a service boundary each service must be self-sufficient.
 | `GET` | `/accounts/{id}/balance` | Current balance |
 | `GET` | `/accounts/{id}` | Details + recent transactions |
 | `GET` | `/health` | Health + DB connectivity |
-| `GET` | `/metrics` | Per-endpoint request/error counts |
 
 ---
 
@@ -148,12 +146,21 @@ health, and metrics — for each service in isolation.
 
 ## Observability
 
+Metrics are **derived from structured logs** rather than exposed by an
+in-service `/metrics` endpoint (the handout's "expose via logs" option). Each
+service emits a JSON log line for every transaction outcome, so an external
+reader (Loki / Elasticsearch / an OTel log pipeline) can aggregate them into
+counts and error rates without the services counting anything themselves.
+
 - **Structured logging** — JSON logs (`timestamp`, `level`, `service`,
-  `message`) on stdout for both services.
+  `logger`, `message`) on stdout for both services.
+- **Outcome events** — every transaction is logged with an `outcome` field so
+  success/failure metrics can be derived downstream:
+  - Gateway: `outcome=stored` | `duplicate` | `rejected`
+  - Account Service: `outcome=applied` | `duplicate`
+  - (Phase 2 adds `outcome=failed` when the Account Service is unreachable.)
 - **Health** — `GET /health` reports service status and DB connectivity
   (`503` if the DB is unreachable).
-- **Custom metric** — `GET /metrics` exposes per-endpoint request and error
-  counts.
 
 ---
 

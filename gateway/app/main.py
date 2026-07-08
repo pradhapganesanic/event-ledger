@@ -5,7 +5,6 @@ Endpoints:
   GET  /events/{id}            retrieve a single event (local data only)
   GET  /events?account={id}    list an account's events, ordered by eventTimestamp
   GET  /health                 status + DB connectivity
-  GET  /metrics                per-endpoint counters
 
 PHASE 1 SCOPE: this stores events in the Gateway's own DB and enforces
 idempotency. The call to the Account Service to *apply* the transaction, plus
@@ -22,7 +21,6 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from . import metrics
 from .database import get_db, init_db
 from .logging_config import SERVICE_NAME, configure_logging
 from .models import Event
@@ -40,7 +38,6 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Event Gateway", lifespan=lifespan)
-metrics.install(app, SERVICE_NAME)
 
 
 @app.exception_handler(RequestValidationError)
@@ -50,6 +47,10 @@ async def validation_exception_handler(request, exc: RequestValidationError):
         {"field": ".".join(str(p) for p in e["loc"] if p != "body"), "message": e["msg"]}
         for e in exc.errors()
     ]
+    log.info(
+        "event rejected",
+        extra={"extra_fields": {"outcome": "rejected", "reason": "validation_error", "details": details}},
+    )
     return JSONResponse(
         status_code=400,
         content={"error": "validation_error", "message": "Invalid request payload", "details": details},
@@ -66,7 +67,10 @@ def create_event(body: EventIn, response: Response, db: Session = Depends(get_db
     existing = db.get(Event, body.eventId)
     if existing is not None:
         response.status_code = 200
-        log.info("duplicate event ignored", extra={"extra_fields": {"eventId": body.eventId}})
+        log.info(
+            "event duplicate ignored",
+            extra={"extra_fields": {"outcome": "duplicate", "eventId": body.eventId, "accountId": body.accountId}},
+        )
         return existing.to_dict()
 
     event = Event(
@@ -91,7 +95,7 @@ def create_event(body: EventIn, response: Response, db: Session = Depends(get_db
     db.refresh(event)
     log.info(
         "event stored",
-        extra={"extra_fields": {"eventId": event.event_id, "accountId": event.account_id}},
+        extra={"extra_fields": {"outcome": "stored", "eventId": event.event_id, "accountId": event.account_id}},
     )
 
     # TODO(Phase 2): switch to the locked "call-first, no orphan rows" contract
