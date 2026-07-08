@@ -28,9 +28,11 @@ class FakeAccount:
         self.transactions = {}  # event_id -> {accountId, type, amount, ...}
         self.last_trace_id = None
         self.down = False
+        self.calls = 0  # number of times the service was actually contacted
         self.transport = httpx.MockTransport(self._handle)
 
     def _handle(self, request: httpx.Request) -> httpx.Response:
+        self.calls += 1
         self.last_trace_id = request.headers.get(TRACE_HEADER)
         if self.down:
             raise httpx.ConnectError("account service unavailable")
@@ -86,9 +88,13 @@ def client(fake_account):
 
     app.dependency_overrides[get_db] = override_get_db
     account_client.set_client(httpx.Client(transport=fake_account.transport, base_url="http://account-test"))
+    # The breaker is a process-wide singleton; reset it so state can't leak
+    # between tests and make them order-dependent.
+    account_client.account_breaker.reset()
 
     with TestClient(app) as c:
         yield c
 
     app.dependency_overrides.clear()
     account_client.reset_client()
+    account_client.account_breaker.reset()

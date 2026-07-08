@@ -7,12 +7,11 @@ with **Python / FastAPI**. Each service is an independently runnable process
 with its **own embedded SQLite database** — they share no database or in-process
 state and communicate only over REST.
 
-> **Build status:** both services are built and tested. The Gateway → Account
-> Service apply call, distributed tracing (trace-ID propagation + logging in both
-> services), the Gateway balance proxy, graceful degradation, and an end-to-end
-> integration test are **done**. The one remaining item is a dedicated
-> **resiliency pattern** (circuit breaker / retry-with-backoff) beyond the
-> request timeout already in place — see [Roadmap](#roadmap).
+> **Build status:** all functional requirements are implemented — the Gateway →
+> Account Service apply call, distributed tracing, a Prometheus `/metrics`
+> custom metric, the Gateway balance proxy, graceful degradation, a **circuit
+> breaker** on the Account Service call, and an end-to-end integration test.
+> Remaining items are optional bonuses (see [Roadmap](#roadmap)).
 
 ---
 
@@ -79,6 +78,13 @@ across a service boundary each service must be self-sufficient.
 - **Graceful degradation** — when the Account Service is unreachable,
   `POST /events` and balance queries return a clear `503`; event reads
   (`GET /events/{id}`, `GET /events?account=`) keep working from local data.
+- **Resiliency (circuit breaker)** — the Gateway's Account Service client is
+  wrapped in a circuit breaker (`gateway/app/resiliency.py`). After
+  `ACCOUNT_BREAKER_THRESHOLD` (default 5) consecutive failures it trips **OPEN**
+  and fails fast — rejecting calls as `503` **without** touching the Account
+  Service — then probes for recovery after `ACCOUNT_BREAKER_RECOVERY_SECONDS`
+  (default 10s). It composes with the per-request timeout (a timeout is one of
+  the failures the breaker counts). See [why a breaker](#resiliency-choice).
 
 ---
 
@@ -96,7 +102,8 @@ docker compose up --build
 ```
 
 - Gateway → http://localhost:8000  (docs at `/docs`)
-- Account Service → http://localhost:8001  (docs at `/docs`)
+- Account Service — **internal only** under compose (not published to the host);
+  the Gateway reaches it in-network at `http://account-service:8001`.
 
 ## Run — locally without Docker
 
@@ -162,6 +169,9 @@ Coverage:
   queries return `503` (and no orphan event is stored); event reads still work.
 - **Balance proxy** — returns balance, `404` for unknown accounts, `503` when
   the Account Service is down.
+- **Resiliency (circuit breaker)** — repeated failures trip the breaker OPEN and
+  the Gateway stops calling the Account Service (asserted via a call counter);
+  plus unit tests for OPEN → HALF_OPEN recovery, re-open on trial failure, reset.
 - **Integration** — full Gateway → Account Service flow over real HTTP: apply,
   trace ID present, balance proxy, idempotent resubmit, out-of-order + debit.
 
@@ -170,18 +180,23 @@ Coverage:
 `.github/workflows/ci.yml` runs on every pull request and on pushes to the
 default branch:
 
-- **`unit-tests`** — runs each service's suite with a coverage gate:
-  `pytest --cov=app --cov-fail-under=90`. The build **fails if coverage drops
-  below 90%**, so a PR cannot merge under the threshold. Current coverage:
-  Account ~94%, Gateway ~95%.
+- **`unit-tests`** — runs each service's suite with a **100% coverage gate**
+  (`--cov-branch --cov-fail-under=100`). The build **fails if either line or
+  branch coverage drops below 100%**, so a PR cannot merge under the threshold.
+  CI reports the two figures on separate lines:
+
+  ```
+  Line coverage:   100.00%
+  Branch coverage: 100.00%
+  ```
 - **`integration-tests`** — starts both real services and runs the `integration`
   suite over HTTP.
 
-Reproduce the coverage gate locally:
+Reproduce the coverage gate locally (line + branch, must be 100%):
 
 ```bash
-cd account-service && pytest --cov=app --cov-report=term-missing --cov-fail-under=90
-cd gateway         && pytest --cov=app --cov-report=term-missing --cov-fail-under=90
+cd account-service && pytest --cov=app --cov-branch --cov-report=term-missing --cov-fail-under=100
+cd gateway         && pytest --cov=app --cov-branch --cov-report=term-missing --cov-fail-under=100
 ```
 
 ---
@@ -223,32 +238,53 @@ cd gateway         && pytest --cov=app --cov-report=term-missing --cov-fail-unde
   `503` when it is down).
 - **Request timeout** — the Account Service client applies a timeout (default
   `3s`, `ACCOUNT_TIMEOUT_SECONDS`) so a slow/hung Account Service cannot block
-  the Gateway. This is basic hygiene; a full resiliency pattern (circuit breaker
-  / retry-with-backoff) is the remaining roadmap item.
+  the Gateway. Timeouts are counted as failures by the circuit breaker below.
+
+<a id="resiliency-choice"></a>
+
+### Resiliency pattern choice — circuit breaker
+
+The handout asks for **at least one** resiliency pattern and an explanation of
+the choice. This project uses a **circuit breaker** (plus a request timeout).
+
+- **Why breaker over retry:** the Account Service is a single synchronous
+  dependency. When it is genuinely down, retrying just adds load to a failing
+  service and drags every request out to the full timeout before failing. A
+  breaker instead **fails fast** — once tripped it returns `503` immediately
+  without contacting the Account Service — protecting the Gateway's threads and
+  giving the dependency room to recover.
+- **How it composes:** the per-request timeout bounds any single slow call; the
+  breaker bounds *repeated* failure by short-circuiting. An OPEN breaker maps to
+  the same `503` graceful-degradation path already used when the service is down.
+- **Tunable via env:** `ACCOUNT_BREAKER_THRESHOLD` (default 5),
+  `ACCOUNT_BREAKER_RECOVERY_SECONDS` (default 10).
+
+Retry-with-backoff was intentionally *not* added: with a strictly idempotent
+downstream it would be safe, but it works against fail-fast here and adds
+latency during outages. It remains an easy future addition for transient blips.
 
 ---
 
 ## Roadmap
 
-Done:
+Done — all functional requirements:
 
 - ✅ **Gateway → Account Service apply call** inside `POST /events` (call-first
   contract below)
 - ✅ **Distributed tracing** — trace ID generated at the Gateway, propagated via
   header, logged in both services, echoed on responses
+- ✅ **Custom metric** — Prometheus `/metrics` on both services (see Observability)
 - ✅ **Graceful degradation** — `POST /events` and balance queries return `503`
   when the Account Service is down; event reads keep working
 - ✅ **Balance proxy** endpoint on the Gateway
-- ✅ **Integration + trace-propagation tests** across both services
+- ✅ **Resiliency** — circuit breaker on the Account Service call, with a test
+  that trips it and asserts it stops calling the service
+- ✅ **Integration + trace-propagation + resiliency tests** across both services
 
-Remaining:
+Remaining (optional bonuses):
 
-- **Resiliency pattern (Req #5)** — a circuit breaker and/or retry-with-backoff
-  on the Account Service call, beyond the request timeout already in place, plus
-  a test that simulates repeated failures and asserts the breaker opens.
-- **Bonus** — a Prometheus `/metrics` endpoint is already implemented (see
-  Observability). Not yet done: OTel Collector + Jaeger for trace visualization,
-  rate limiting, async fallback (queue-when-down).
+- OTel Collector + Jaeger for trace visualization, rate limiting, and async
+  fallback (queue events locally when the Account Service is down).
 
 ### Design decision — `POST /events` is "call-first, no orphan rows"
 

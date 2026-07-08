@@ -163,6 +163,29 @@ def test_balance_proxy_503_when_account_down(client, fake_account):
     assert r.json()["detail"]["error"] == "account_service_unavailable"
 
 
+# --- Resiliency: circuit breaker (Req #5, closes the Req #8 resiliency-test gap) ---
+
+
+def test_circuit_breaker_opens_and_stops_calling(client, fake_account):
+    fake_account.down = True
+    # failure_threshold consecutive failures -> breaker trips OPEN.
+    for i in range(5):
+        assert client.post("/events", json=_event(f"f{i}", "a", "CREDIT", 1)).status_code == 503
+
+    calls_before = fake_account.calls
+    r = client.post("/events", json=_event("blocked", "a", "CREDIT", 1))
+    assert r.status_code == 503
+    # Breaker short-circuited: the Account Service was never contacted again.
+    assert fake_account.calls == calls_before
+
+
+def test_circuit_breaker_closed_calls_pass_through(client, fake_account):
+    # Sanity: while CLOSED, calls reach the Account Service normally.
+    r = client.post("/events", json=_event("ok", "a", "CREDIT", 1))
+    assert r.status_code == 201
+    assert fake_account.calls == 1
+
+
 def test_get_db_dependency_yields_and_closes():
     # Exercise the real get_db dependency (tests otherwise override it).
     from app.database import get_db

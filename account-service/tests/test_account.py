@@ -67,6 +67,10 @@ def test_balance_unknown_account_returns_404(client):
     assert r.status_code == 404
 
 
+def test_get_account_unknown_returns_404(client):
+    assert client.get("/accounts/ghost").status_code == 404
+
+
 def test_validation_rejects_bad_type(client):
     r = client.post("/accounts/acct-1/transactions", json=_txn("e", "TRANSFER", 10))
     assert r.status_code == 422

@@ -147,7 +147,7 @@ def health(response: Response, db: Session = Depends(get_db)):
     try:
         db.execute(select(1))
         db_ok = True
-    except Exception:  # pragma: no cover - defensive
+    except Exception:
         db_ok = False
     if not db_ok:
         response.status_code = 503

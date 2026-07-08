@@ -3,12 +3,20 @@
 services:
   account-service:
     build: ./account-service
-    ports:
-      - "8001:8001"
+    # `expose` (not `ports`) keeps the Account Service internal-only: reachable
+    # by the Gateway inside the compose network, but NOT published to the host.
+    expose:
+      - "8001"
     environment:
       - DATABASE_URL=sqlite:////data/account.db
     volumes:
       - account-data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
 
   gateway:
     build: ./gateway
@@ -22,7 +30,15 @@ services:
     volumes:
       - gateway-data:/data
     depends_on:
-      - account-service
+      # Wait until the Account Service is actually healthy, not just started.
+      account-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
 
 volumes:
   account-data:
