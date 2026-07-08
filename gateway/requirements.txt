@@ -1,0 +1,4 @@
+fastapi==0.139.0
+uvicorn[standard]
+sqlalchemy==2.0.51
+httpx==0.28.1
