@@ -26,6 +26,7 @@ from sqlalchemy.orm import Session
 
 from . import account_client, metrics, otel
 from .account_client import AccountServiceUnavailable
+from .audit import audit
 from .database import get_db, init_db
 from .logging_config import SERVICE_NAME, configure_logging
 from .models import Event
@@ -72,6 +73,7 @@ async def validation_exception_handler(request, exc: RequestValidationError):
         "event rejected",
         extra={"extra_fields": {"outcome": "rejected", "reason": "validation_error", "details": details}},
     )
+    audit("VALIDATION_FAILED", "REJECTED", reason=", ".join(d["field"] for d in details))
     return JSONResponse(
         status_code=400,
         content={"error": "validation_error", "message": "Invalid request payload", "details": details},
@@ -99,6 +101,7 @@ def create_event(body: EventIn, response: Response, db: Session = Depends(get_db
             "event duplicate ignored",
             extra={"extra_fields": {"outcome": "duplicate", "eventId": body.eventId, "accountId": body.accountId}},
         )
+        audit("DUPLICATE_REJECTED", "REJECTED", accountId=body.accountId, eventId=body.eventId)
         return existing.to_dict()
 
     # Call the Account Service FIRST. Its domain rename: eventTimestamp -> transactionTimestamp.
@@ -117,6 +120,7 @@ def create_event(body: EventIn, response: Response, db: Session = Depends(get_db
             "event apply failed",
             extra={"extra_fields": {"outcome": "failed", "eventId": body.eventId, "accountId": body.accountId, "reason": str(exc)}},
         )
+        audit("EVENT_APPLY_FAILED", "FAILED", accountId=body.accountId, eventId=body.eventId, reason=str(exc))
         raise HTTPException(
             status_code=503,
             detail={
@@ -143,6 +147,7 @@ def create_event(body: EventIn, response: Response, db: Session = Depends(get_db
         # Concurrent duplicate slipped past the read above.
         db.rollback()
         response.status_code = 200
+        audit("DUPLICATE_REJECTED", "REJECTED", accountId=body.accountId, eventId=body.eventId)
         return db.get(Event, body.eventId).to_dict()
 
     db.refresh(event)
@@ -151,6 +156,7 @@ def create_event(body: EventIn, response: Response, db: Session = Depends(get_db
         "event stored",
         extra={"extra_fields": {"outcome": "stored", "eventId": event.event_id, "accountId": event.account_id}},
     )
+    audit("EVENT_APPLIED", "SUCCESS", accountId=event.account_id, eventId=event.event_id)
     return event.to_dict()
 
 

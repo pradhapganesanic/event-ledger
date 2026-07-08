@@ -29,6 +29,7 @@ Read top-to-bottom: high-level architecture first, then each topic in detail.
 5. [Core behavior](#5-core-behavior)
 6. [Resiliency & graceful degradation](#6-resiliency--graceful-degradation)
 7. [Observability (tracing, metrics, logging)](#7-observability)
+   - [Auditing (log-based)](#auditing-log-based)
 8. [Setup & prerequisites](#8-setup--prerequisites)
 9. [Run the app](#9-run-the-app)
 10. [Tests & CI](#10-tests--ci)
@@ -251,6 +252,46 @@ Three signals, each to its natural destination:
   metric labels.
 - **Health** — `GET /health` on both services reports status + DB connectivity
   (`503` if the DB is unreachable).
+
+### Auditing (log-based)
+
+Auditing is **not** a project requirement, so it is kept minimal and log-based —
+**no audit table**. Both services emit audit records on a dedicated **`audit`**
+logger, so the audit trail is a **separate, filterable stream** (grep
+`"logger":"audit"`) and is correlated across services by `traceId`.
+
+Audit points sit where each service *acts* — notably around the Gateway → Account
+call:
+
+```
+  POST /events ─▶  Event Gateway  ────── apply ──────▶  Account Service
+                    │ audit:                              │ audit:
+                    │  VALIDATION_FAILED                  │  TXN_APPLIED
+                    │  DUPLICATE_REJECTED                 │  DUPLICATE_REJECTED
+                    │  EVENT_APPLY_FAILED                 │
+                    │  EVENT_APPLIED  ◀───────────────────┘  (same traceId links both)
+```
+
+Each record is structured JSON, e.g. from the Account Service:
+
+```json
+{"timestamp":"…","service":"account-service","traceId":"0743…","logger":"audit",
+ "action":"TXN_APPLIED","outcome":"SUCCESS","accountId":"acct-9","eventId":"evt-1",
+ "type":"CREDIT","amount":150.0}
+```
+
+- **Fields:** `action` (`EVENT_APPLIED | TXN_APPLIED | DUPLICATE_REJECTED |
+  VALIDATION_FAILED | EVENT_APPLY_FAILED`), `outcome` (`SUCCESS | REJECTED |
+  FAILED`), target (`accountId`, `eventId`), and `traceId` linking back to the
+  distributed trace.
+- **Provenance (who/where-from):** taken from the event's `metadata`
+  (`source`, `batchId`) — already stored on the event and returned by
+  `GET /events`. Since there is no auth yet, `metadata.source` is a *stand-in*
+  for an authenticated actor (a documented trust-boundary gap).
+- **Intentional gaps** (audit isn't required): no persistent `audit_log` table or
+  query API, no verified actor, no tamper-evidence. A persistent audit table —
+  one row per state change, written in the **same DB transaction** as the
+  mutation — would be the next step if audit became a hard requirement.
 
 ---
 

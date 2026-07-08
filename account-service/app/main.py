@@ -19,6 +19,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from . import metrics, otel
+from .audit import audit
 from .database import get_db, init_db
 from .logging_config import SERVICE_NAME, configure_logging
 from .models import Transaction
@@ -90,6 +91,7 @@ def apply_transaction(
             "transaction duplicate ignored",
             extra={"extra_fields": {"outcome": "duplicate", "eventId": body.eventId, "accountId": account_id}},
         )
+        audit("DUPLICATE_REJECTED", "REJECTED", accountId=account_id, eventId=body.eventId)
         return existing.to_dict()
 
     txn = Transaction(
@@ -108,6 +110,7 @@ def apply_transaction(
         db.rollback()
         existing = db.scalar(select(Transaction).where(Transaction.event_id == body.eventId))
         response.status_code = 200
+        audit("DUPLICATE_REJECTED", "REJECTED", accountId=account_id, eventId=body.eventId)
         return existing.to_dict()
 
     db.refresh(txn)
@@ -116,6 +119,7 @@ def apply_transaction(
         "transaction applied",
         extra={"extra_fields": {"outcome": "applied", "eventId": txn.event_id, "accountId": account_id, "type": txn.type, "amount": float(txn.amount)}},
     )
+    audit("TXN_APPLIED", "SUCCESS", accountId=account_id, eventId=txn.event_id, type=txn.type, amount=float(txn.amount))
     return txn.to_dict()
 
 
