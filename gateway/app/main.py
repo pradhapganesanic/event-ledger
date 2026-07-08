@@ -1,30 +1,35 @@
 """Event Gateway (public-facing) — the entry point for all client requests.
 
 Endpoints:
-  POST /events                 submit a transaction event (validate + dedup + store)
-  GET  /events/{id}            retrieve a single event (local data only)
-  GET  /events?account={id}    list an account's events, ordered by eventTimestamp
-  GET  /health                 status + DB connectivity
+  POST /events                    submit a transaction event (validate + apply + store)
+  GET  /events/{id}               retrieve a single event (local data only)
+  GET  /events?account={id}       list an account's events, ordered by eventTimestamp
+  GET  /accounts/{id}/balance     balance proxy to the Account Service
+  GET  /health                    status + DB connectivity
 
-PHASE 1 SCOPE: this stores events in the Gateway's own DB and enforces
-idempotency. The call to the Account Service to *apply* the transaction, plus
-trace propagation, resiliency, and graceful degradation, are Phase 2 (see the
-TODO in create_event). GET reads already depend only on local data.
+POST /events uses the "call-first, no orphan rows" contract: it calls the
+Account Service to apply the transaction BEFORE persisting locally. On success
+the event is stored (APPLIED) and 201 returned; if the Account Service is
+unavailable the Gateway returns 503 and stores nothing. GET reads depend only on
+local data and keep working during an Account Service outage.
 """
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Response
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from . import account_client
+from .account_client import AccountServiceUnavailable
 from .database import get_db, init_db
 from .logging_config import SERVICE_NAME, configure_logging
 from .models import Event
 from .schemas import EventIn
+from .tracing import TRACE_HEADER, new_trace_id, set_trace_id
 
 configure_logging()
 log = logging.getLogger(SERVICE_NAME)
@@ -38,6 +43,18 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Event Gateway", lifespan=lifespan)
+
+
+@app.middleware("http")
+async def trace_middleware(request: Request, call_next):
+    """Origin of the trace: generate a trace ID per request (or honour one an
+    upstream caller already supplied), expose it to logging via the contextvar,
+    and echo it on the response. It is propagated downstream by account_client."""
+    trace_id = request.headers.get(TRACE_HEADER) or new_trace_id()
+    set_trace_id(trace_id)
+    response = await call_next(request)
+    response.headers[TRACE_HEADER] = trace_id
+    return response
 
 
 @app.exception_handler(RequestValidationError)
@@ -59,10 +76,16 @@ async def validation_exception_handler(request, exc: RequestValidationError):
 
 @app.post("/events", status_code=201)
 def create_event(body: EventIn, response: Response, db: Session = Depends(get_db)):
-    """Validate, enforce idempotency, and store the event locally.
+    """Validate, enforce idempotency, apply to the Account Service, then store.
 
-    Idempotency: a repeated eventId returns the original event with 200 and does
-    not create a duplicate.
+    Contract: "call-first, no orphan rows".
+      - duplicate eventId               -> return original, 200 (idempotent)
+      - Account Service applies it       -> store event (APPLIED), 201
+      - Account Service unavailable      -> 503, store NOTHING
+
+    A Gateway event therefore exists iff a matching Account transaction exists.
+    Retries after a 503 are safe because the Account Service is idempotent on
+    eventId.
     """
     existing = db.get(Event, body.eventId)
     if existing is not None:
@@ -73,6 +96,30 @@ def create_event(body: EventIn, response: Response, db: Session = Depends(get_db
         )
         return existing.to_dict()
 
+    # Call the Account Service FIRST. Its domain rename: eventTimestamp -> transactionTimestamp.
+    payload = {
+        "eventId": body.eventId,
+        "type": body.type,
+        "amount": body.amount,
+        "currency": body.currency,
+        "transactionTimestamp": body.eventTimestamp.isoformat(),
+    }
+    try:
+        account_client.apply_transaction(body.accountId, payload)
+    except AccountServiceUnavailable as exc:
+        log.warning(
+            "event apply failed",
+            extra={"extra_fields": {"outcome": "failed", "eventId": body.eventId, "accountId": body.accountId, "reason": str(exc)}},
+        )
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "account_service_unavailable",
+                "message": "Account Service is unreachable; event was not applied. Please retry.",
+            },
+        )
+
+    # Applied downstream -> persist locally as APPLIED.
     event = Event(
         event_id=body.eventId,
         account_id=body.accountId,
@@ -81,7 +128,7 @@ def create_event(body: EventIn, response: Response, db: Session = Depends(get_db
         currency=body.currency,
         event_timestamp=body.eventTimestamp,
         event_metadata=body.metadata,
-        status="PENDING",
+        status="APPLIED",
     )
     db.add(event)
     try:
@@ -97,14 +144,34 @@ def create_event(body: EventIn, response: Response, db: Session = Depends(get_db
         "event stored",
         extra={"extra_fields": {"outcome": "stored", "eventId": event.event_id, "accountId": event.account_id}},
     )
-
-    # TODO(Phase 2): switch to the locked "call-first, no orphan rows" contract
-    # (see README "Phase 2 design decision"): call Account Service
-    # POST /accounts/{id}/transactions BEFORE persisting, with trace propagation
-    # + resiliency. On success store the event (APPLIED) and return 201; if the
-    # Account Service is down/breaker-open, return 503 and store NOTHING. The
-    # Account Service's idempotency on eventId makes retries after a 503 safe.
     return event.to_dict()
+
+
+@app.get("/accounts/{account_id}/balance")
+def get_balance_proxy(account_id: str):
+    """Proxy balance queries to the Account Service (which owns balance).
+
+    The Account Service is internal-only, so clients reach balance through the
+    Gateway. Returns a clear 503 when the Account Service is unreachable
+    (graceful degradation) and 404 for an unknown account.
+    """
+    try:
+        result = account_client.get_balance(account_id)
+    except AccountServiceUnavailable as exc:
+        log.warning(
+            "balance query failed",
+            extra={"extra_fields": {"outcome": "failed", "accountId": account_id, "reason": str(exc)}},
+        )
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "account_service_unavailable",
+                "message": "Balance is temporarily unavailable; the Account Service is unreachable.",
+            },
+        )
+    if result is None:
+        raise HTTPException(status_code=404, detail=f"Account {account_id} not found")
+    return result
 
 
 @app.get("/events/{event_id}")

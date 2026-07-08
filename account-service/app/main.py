@@ -12,7 +12,7 @@ is correct regardless of the order in which transactions arrive.
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, HTTPException, Response
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -21,6 +21,7 @@ from .database import get_db, init_db
 from .logging_config import SERVICE_NAME, configure_logging
 from .models import Transaction
 from .schemas import TransactionIn
+from .tracing import TRACE_HEADER, new_trace_id, set_trace_id
 
 configure_logging()
 log = logging.getLogger(SERVICE_NAME)
@@ -34,6 +35,17 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Account Service", lifespan=lifespan)
+
+
+@app.middleware("http")
+async def trace_middleware(request: Request, call_next):
+    """Read the propagated trace ID (or generate one), expose it to logging via
+    the contextvar, and echo it on the response."""
+    trace_id = request.headers.get(TRACE_HEADER) or new_trace_id()
+    set_trace_id(trace_id)
+    response = await call_next(request)
+    response.headers[TRACE_HEADER] = trace_id
+    return response
 
 
 def _balance_for(db: Session, account_id: str) -> float:

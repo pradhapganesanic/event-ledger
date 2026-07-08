@@ -9,6 +9,8 @@ import logging
 import sys
 from datetime import datetime, timezone
 
+from .tracing import get_trace_id
+
 SERVICE_NAME = "event-gateway"
 
 
@@ -18,6 +20,7 @@ class JsonFormatter(logging.Formatter):
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "level": record.levelname,
             "service": SERVICE_NAME,
+            "traceId": get_trace_id(),
             "logger": record.name,
             "message": record.getMessage(),
         }
