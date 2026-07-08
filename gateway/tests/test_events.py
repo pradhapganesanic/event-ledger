@@ -1,9 +1,13 @@
-"""Event Gateway unit tests — service tested in isolation (no Account Service).
+"""Event Gateway tests.
 
-Covers core functionality: validation, idempotency, out-of-order listing, and
-local-only reads. Cross-service concerns (apply call, tracing, resiliency,
-graceful degradation) are Phase 2.
+Covers core functionality (validation, idempotency, out-of-order listing,
+local-only reads) plus the cross-service behaviour exercised through a
+FakeAccount stand-in: trace propagation, graceful degradation, and the balance
+proxy. A true end-to-end test against a real Account Service lives in
+`integration/`.
 """
+
+from app.tracing import TRACE_HEADER
 
 
 def _event(event_id, account_id, type_, amount, ts="2026-05-15T14:02:11Z", currency="USD", metadata=None):
@@ -20,12 +24,12 @@ def _event(event_id, account_id, type_, amount, ts="2026-05-15T14:02:11Z", curre
     return body
 
 
-def test_post_event_stores_and_returns_201(client):
+def test_post_event_applies_and_returns_201(client):
     r = client.post("/events", json=_event("evt-1", "acct-1", "CREDIT", 150.00, metadata={"source": "batch"}))
     assert r.status_code == 201
     body = r.json()
     assert body["eventId"] == "evt-1"
-    assert body["status"] == "PENDING"
+    assert body["status"] == "APPLIED"  # applied on the Account Service before storing
     assert body["metadata"] == {"source": "batch"}
 
 
@@ -94,3 +98,76 @@ def test_health_reports_db_connected(client):
     assert body["status"] == "ok"
     assert body["service"] == "event-gateway"
     assert body["database"] == "connected"
+
+
+# --- Distributed tracing (Req #3) ---
+
+
+def test_trace_id_generated_and_propagated(client, fake_account):
+    r = client.post("/events", json=_event("e1", "acct-1", "CREDIT", 10))
+    assert r.status_code == 201
+    trace_id = r.headers[TRACE_HEADER]
+    assert trace_id and trace_id != "-"
+    # The SAME trace ID the Gateway generated was propagated to the Account Service.
+    assert fake_account.last_trace_id == trace_id
+
+
+def test_incoming_trace_id_is_honored_and_propagated(client, fake_account):
+    r = client.post(
+        "/events",
+        json=_event("e2", "acct-1", "CREDIT", 10),
+        headers={TRACE_HEADER: "trace-xyz"},
+    )
+    assert r.headers[TRACE_HEADER] == "trace-xyz"
+    assert fake_account.last_trace_id == "trace-xyz"
+
+
+# --- Graceful degradation (Req #6) ---
+
+
+def test_post_events_returns_503_when_account_down(client, fake_account):
+    fake_account.down = True
+    r = client.post("/events", json=_event("e3", "acct-1", "CREDIT", 10))
+    assert r.status_code == 503
+    assert r.json()["detail"]["error"] == "account_service_unavailable"
+    # No orphan row: nothing was stored because the apply failed.
+    assert client.get("/events/e3").status_code == 404
+
+
+def test_reads_still_work_when_account_down(client, fake_account):
+    client.post("/events", json=_event("ok", "acct-1", "CREDIT", 10))  # applied while up
+    fake_account.down = True
+    assert client.get("/events/ok").status_code == 200
+    assert client.get("/events", params={"account": "acct-1"}).status_code == 200
+
+
+# --- Balance proxy (Req #6) ---
+
+
+def test_balance_proxy_returns_balance(client):
+    client.post("/events", json=_event("c1", "acct-1", "CREDIT", 100))
+    client.post("/events", json=_event("d1", "acct-1", "DEBIT", 30))
+    r = client.get("/accounts/acct-1/balance")
+    assert r.status_code == 200
+    assert r.json() == {"accountId": "acct-1", "balance": 70.0}
+
+
+def test_balance_proxy_404_for_unknown_account(client):
+    assert client.get("/accounts/ghost/balance").status_code == 404
+
+
+def test_balance_proxy_503_when_account_down(client, fake_account):
+    fake_account.down = True
+    r = client.get("/accounts/acct-1/balance")
+    assert r.status_code == 503
+    assert r.json()["detail"]["error"] == "account_service_unavailable"
+
+
+def test_get_db_dependency_yields_and_closes():
+    # Exercise the real get_db dependency (tests otherwise override it).
+    from app.database import get_db
+
+    gen = get_db()
+    session = next(gen)
+    assert session is not None
+    gen.close()

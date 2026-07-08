@@ -86,3 +86,31 @@ def test_health_reports_db_connected(client):
     assert body["status"] == "ok"
     assert body["service"] == "account-service"
     assert body["database"] == "connected"
+
+
+# --- Distributed tracing (Req #3): the Account Service echoes the propagated ID ---
+
+
+def test_incoming_trace_id_is_echoed(client):
+    r = client.post(
+        "/accounts/acct-1/transactions",
+        json=_txn("e", "CREDIT", 10),
+        headers={"X-Trace-Id": "trace-abc"},
+    )
+    assert r.headers["X-Trace-Id"] == "trace-abc"
+
+
+def test_trace_id_generated_when_absent(client):
+    # Even a direct call with no incoming trace header gets one on the response.
+    r = client.get("/accounts/acct-1/balance")
+    assert r.headers.get("X-Trace-Id") not in (None, "-")
+
+
+def test_get_db_dependency_yields_and_closes():
+    # Exercise the real get_db dependency (tests otherwise override it).
+    from app.database import get_db
+
+    gen = get_db()
+    session = next(gen)
+    assert session is not None
+    gen.close()
