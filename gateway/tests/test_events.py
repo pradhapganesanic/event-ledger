@@ -171,3 +171,28 @@ def test_get_db_dependency_yields_and_closes():
     session = next(gen)
     assert session is not None
     gen.close()
+
+
+# --- Custom metric (Req #4): Prometheus /metrics endpoint ---
+
+
+def test_metrics_endpoint_exposes_prometheus_format(client):
+    r = client.get("/metrics")
+    assert r.status_code == 200
+    assert "text/plain" in r.headers["content-type"]
+    body = r.text
+    assert "http_requests_total" in body
+    assert "http_request_duration_seconds" in body
+    assert "gateway_events_total" in body
+
+
+def test_custom_event_counter_increments_by_outcome(client, fake_account):
+    client.post("/events", json=_event("m1", "acct-1", "CREDIT", 10))  # stored
+    client.post("/events", json=_event("m1", "acct-1", "CREDIT", 10))  # duplicate
+    client.post("/events", json=_event("bad", "acct-1", "CREDIT", -1))  # rejected
+    fake_account.down = True
+    client.post("/events", json=_event("m2", "acct-1", "CREDIT", 10))  # failed
+
+    body = client.get("/metrics").text
+    for outcome in ("stored", "duplicate", "rejected", "failed"):
+        assert f'gateway_events_total{{outcome="{outcome}"}}' in body

@@ -5,6 +5,7 @@ Endpoints:
   GET  /accounts/{accountId}/balance       current balance
   GET  /accounts/{accountId}               details + recent transactions
   GET  /health                             status + DB connectivity
+  GET  /metrics                            Prometheus metrics
 
 Balance = sum(CREDIT) - sum(DEBIT), computed from applied transactions, so it
 is correct regardless of the order in which transactions arrive.
@@ -17,6 +18,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from . import metrics
 from .database import get_db, init_db
 from .logging_config import SERVICE_NAME, configure_logging
 from .models import Transaction
@@ -35,6 +37,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Account Service", lifespan=lifespan)
+metrics.install(app)
 
 
 @app.middleware("http")
@@ -81,6 +84,7 @@ def apply_transaction(
     existing = db.scalar(select(Transaction).where(Transaction.event_id == body.eventId))
     if existing is not None:
         response.status_code = 200
+        metrics.TRANSACTIONS.labels("duplicate").inc()
         log.info(
             "transaction duplicate ignored",
             extra={"extra_fields": {"outcome": "duplicate", "eventId": body.eventId, "accountId": account_id}},
@@ -106,6 +110,7 @@ def apply_transaction(
         return existing.to_dict()
 
     db.refresh(txn)
+    metrics.TRANSACTIONS.labels("applied").inc()
     log.info(
         "transaction applied",
         extra={"extra_fields": {"outcome": "applied", "eventId": txn.event_id, "accountId": account_id, "type": txn.type, "amount": float(txn.amount)}},

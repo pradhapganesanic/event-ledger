@@ -6,6 +6,7 @@ Endpoints:
   GET  /events?account={id}       list an account's events, ordered by eventTimestamp
   GET  /accounts/{id}/balance     balance proxy to the Account Service
   GET  /health                    status + DB connectivity
+  GET  /metrics                   Prometheus metrics
 
 POST /events uses the "call-first, no orphan rows" contract: it calls the
 Account Service to apply the transaction BEFORE persisting locally. On success
@@ -23,7 +24,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from . import account_client
+from . import account_client, metrics
 from .account_client import AccountServiceUnavailable
 from .database import get_db, init_db
 from .logging_config import SERVICE_NAME, configure_logging
@@ -43,6 +44,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Event Gateway", lifespan=lifespan)
+metrics.install(app)
 
 
 @app.middleware("http")
@@ -64,6 +66,7 @@ async def validation_exception_handler(request, exc: RequestValidationError):
         {"field": ".".join(str(p) for p in e["loc"] if p != "body"), "message": e["msg"]}
         for e in exc.errors()
     ]
+    metrics.EVENTS.labels("rejected").inc()
     log.info(
         "event rejected",
         extra={"extra_fields": {"outcome": "rejected", "reason": "validation_error", "details": details}},
@@ -90,6 +93,7 @@ def create_event(body: EventIn, response: Response, db: Session = Depends(get_db
     existing = db.get(Event, body.eventId)
     if existing is not None:
         response.status_code = 200
+        metrics.EVENTS.labels("duplicate").inc()
         log.info(
             "event duplicate ignored",
             extra={"extra_fields": {"outcome": "duplicate", "eventId": body.eventId, "accountId": body.accountId}},
@@ -107,6 +111,7 @@ def create_event(body: EventIn, response: Response, db: Session = Depends(get_db
     try:
         account_client.apply_transaction(body.accountId, payload)
     except AccountServiceUnavailable as exc:
+        metrics.EVENTS.labels("failed").inc()
         log.warning(
             "event apply failed",
             extra={"extra_fields": {"outcome": "failed", "eventId": body.eventId, "accountId": body.accountId, "reason": str(exc)}},
@@ -140,6 +145,7 @@ def create_event(body: EventIn, response: Response, db: Session = Depends(get_db
         return db.get(Event, body.eventId).to_dict()
 
     db.refresh(event)
+    metrics.EVENTS.labels("stored").inc()
     log.info(
         "event stored",
         extra={"extra_fields": {"outcome": "stored", "eventId": event.event_id, "accountId": event.account_id}},
