@@ -144,18 +144,19 @@ health, and metrics — for each service in isolation.
 
 ---
 
-## Observability
+## Logging & health
 
-Metrics are **derived from structured logs** rather than exposed by an
-in-service `/metrics` endpoint (the handout's "expose via logs" option). Each
-service emits a JSON log line for every transaction outcome, so an external
-reader (Loki / Elasticsearch / an OTel log pipeline) can aggregate them into
-counts and error rates without the services counting anything themselves.
+Observability here is **log-first**: the services do not compute or expose
+metrics in-process (there is no `/metrics` endpoint). Each service emits
+structured JSON logs, including an outcome event for every transaction. This
+addresses the handout's custom-metric requirement through its **"expose via
+logs"** option — the outcome events let an external pipeline (Loki /
+Elasticsearch / an OTel log processor) derive request and error counts
+downstream, without the services counting anything themselves.
 
 - **Structured logging** — JSON logs (`timestamp`, `level`, `service`,
   `logger`, `message`) on stdout for both services.
-- **Outcome events** — every transaction is logged with an `outcome` field so
-  success/failure metrics can be derived downstream:
+- **Outcome events** — every transaction is logged with an `outcome` field:
   - Gateway: `outcome=stored` | `duplicate` | `rejected`
   - Account Service: `outcome=applied` | `duplicate`
   - (Phase 2 adds `outcome=failed` when the Account Service is unreachable.)
