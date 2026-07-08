@@ -114,3 +114,24 @@ def test_get_db_dependency_yields_and_closes():
     session = next(gen)
     assert session is not None
     gen.close()
+
+
+# --- Custom metric (Req #4): Prometheus /metrics endpoint ---
+
+
+def test_metrics_endpoint_exposes_prometheus_format(client):
+    r = client.get("/metrics")
+    assert r.status_code == 200
+    assert "text/plain" in r.headers["content-type"]
+    body = r.text
+    assert "http_requests_total" in body
+    assert "http_request_duration_seconds" in body
+    assert "account_transactions_total" in body
+
+
+def test_custom_transaction_counter_increments(client):
+    client.post("/accounts/acct-1/transactions", json=_txn("m1", "CREDIT", 10))
+    client.post("/accounts/acct-1/transactions", json=_txn("m1", "CREDIT", 10))  # duplicate
+    body = client.get("/metrics").text
+    assert 'account_transactions_total{outcome="applied"}' in body
+    assert 'account_transactions_total{outcome="duplicate"}' in body

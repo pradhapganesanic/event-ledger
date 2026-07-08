@@ -46,6 +46,7 @@ across a service boundary each service must be self-sufficient.
 | `GET` | `/events?account={id}` | List an account's events, ordered by `eventTimestamp` |
 | `GET` | `/accounts/{id}/balance` | Balance proxy → Account Service (`503` if it is down) |
 | `GET` | `/health` | Health + DB connectivity |
+| `GET` | `/metrics` | Prometheus metrics |
 
 **Account Service (internal)**
 
@@ -55,6 +56,7 @@ across a service boundary each service must be self-sufficient.
 | `GET` | `/accounts/{id}/balance` | Current balance |
 | `GET` | `/accounts/{id}` | Details + recent transactions |
 | `GET` | `/health` | Health + DB connectivity |
+| `GET` | `/metrics` | Prometheus metrics |
 
 ---
 
@@ -182,24 +184,22 @@ cd gateway         && pytest --cov=app --cov-report=term-missing --cov-fail-unde
 
 ---
 
-## Logging & health
+## Observability
 
-Observability here is **log-first**: the services do not compute or expose
-metrics in-process (there is no `/metrics` endpoint). Each service emits
-structured JSON logs, including an outcome event for every transaction. This
-addresses the handout's custom-metric requirement through its **"expose via
-logs"** option — the outcome events let an external pipeline (Loki /
-Elasticsearch / an OTel log processor) derive request and error counts
-downstream, without the services counting anything themselves.
-
+- **Metrics** — both services expose `GET /metrics` in Prometheus text format
+  (via the `prometheus-client` library), satisfying Req #4 through both an
+  **endpoint** and an **observability library**. Exposed:
+  - `http_requests_total{method,endpoint,status}` — request count + error rate
+    (labelled by route template, not raw path, to bound cardinality)
+  - `http_request_duration_seconds` — latency histogram
+  - **custom domain counter** — `gateway_events_total{outcome}` (stored |
+    duplicate | rejected | failed) and `account_transactions_total{outcome}`
+    (applied | duplicate)
 - **Structured logging** — JSON logs (`timestamp`, `level`, `service`,
   `traceId`, `logger`, `message`) on stdout for both services. The `traceId` is
   the propagated trace ID, so logs from a single request correlate across both
-  services.
-- **Outcome events** — every transaction is logged with an `outcome` field:
-  - Gateway: `outcome=stored` | `duplicate` | `rejected` | `failed`
-  - Account Service: `outcome=applied` | `duplicate`
-  - (`failed` is logged by the Gateway when the Account Service is unreachable.)
+  services. Every transaction is also logged with an `outcome` field mirroring
+  the counter labels above.
 - **Health** — `GET /health` reports service status and DB connectivity
   (`503` if the DB is unreachable).
 
@@ -244,8 +244,9 @@ Remaining:
 - **Resiliency pattern (Req #5)** — a circuit breaker and/or retry-with-backoff
   on the Account Service call, beyond the request timeout already in place, plus
   a test that simulates repeated failures and asserts the breaker opens.
-- **Bonus** — OTel Collector + Jaeger for trace visualization, Prometheus
-  metrics, rate limiting, async fallback (queue-when-down).
+- **Bonus** — a Prometheus `/metrics` endpoint is already implemented (see
+  Observability). Not yet done: OTel Collector + Jaeger for trace visualization,
+  rate limiting, async fallback (queue-when-down).
 
 ### Design decision — `POST /events` is "call-first, no orphan rows"
 

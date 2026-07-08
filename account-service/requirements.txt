@@ -1,3 +1,4 @@
 fastapi==0.139.0
 uvicorn[standard]
 sqlalchemy==2.0.51
+prometheus-client==0.25.0
