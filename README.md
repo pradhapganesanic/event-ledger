@@ -1,5 +1,7 @@
 # Event Ledger
 
+[![CI](https://github.com/pradhapganesanic/event-ledger/actions/workflows/ci.yml/badge.svg)](https://github.com/pradhapganesanic/event-ledger/actions/workflows/ci.yml)
+
 Two independent microservices that process financial transaction events, built
 with **Python / FastAPI**. Each service is an independently runnable process
 with its **own embedded SQLite database** — they share no database or in-process
