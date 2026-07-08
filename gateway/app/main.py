@@ -94,9 +94,12 @@ def create_event(body: EventIn, response: Response, db: Session = Depends(get_db
         extra={"extra_fields": {"eventId": event.event_id, "accountId": event.account_id}},
     )
 
-    # TODO(Phase 2): call Account Service POST /accounts/{id}/transactions here,
-    # with trace propagation + resiliency; set status APPLIED/FAILED and return
-    # 503 on graceful degradation when the Account Service is unavailable.
+    # TODO(Phase 2): switch to the locked "call-first, no orphan rows" contract
+    # (see README "Phase 2 design decision"): call Account Service
+    # POST /accounts/{id}/transactions BEFORE persisting, with trace propagation
+    # + resiliency. On success store the event (APPLIED) and return 201; if the
+    # Account Service is down/breaker-open, return 503 and store NOTHING. The
+    # Account Service's idempotency on eventId makes retries after a 503 safe.
     return event.to_dict()
 
 

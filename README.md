@@ -176,8 +176,8 @@ health, and metrics — for each service in isolation.
 
 Phase 2 (cross-service concerns, deferred by design):
 
-- Gateway → Account Service apply call inside `POST /events`
-  (status `PENDING` → `APPLIED`/`FAILED`)
+- **Gateway → Account Service apply call** inside `POST /events` — see the
+  chosen contract below
 - **Distributed tracing** — generate a trace ID at the Gateway, propagate via
   HTTP header, log it in both services
 - **Resiliency** — timeout + retry with backoff and/or a circuit breaker on the
@@ -186,3 +186,38 @@ Phase 2 (cross-service concerns, deferred by design):
   Service is down; event reads keep working; balance proxy returns a clear error
 - **Balance proxy** endpoint on the Gateway
 - **Integration + resiliency tests** across both services
+
+### Phase 2 design decision — `POST /events` is "call-first, no orphan rows"
+
+When the Account Service is down, the Gateway **rejects with `503` and stores
+nothing**. It does not persist an unapplied event. This keeps a clean
+invariant:
+
+> **A Gateway event exists ⟺ a matching Account Service transaction exists.**
+> The two stores mirror each other; there are no "received but not applied"
+> limbo rows.
+
+Chosen flow:
+
+```
+POST /events
+1. validate
+2. dedup: eventId already in Gateway store?  → return original, 200
+3. call Account Service (idempotent on eventId)
+     success        → store event (APPLIED), return 201
+     down / breaker → return 503, store NOTHING
+```
+
+**Why this is correct on retry:** the Account Service is the idempotency
+authority (unique constraint on `eventId`). If a call is applied but the
+response times out, the Gateway returns `503` and stores nothing; a client
+retry re-calls the Account Service, which recognises the duplicate `eventId`,
+returns the already-applied transaction, and the Gateway then records it. The
+system converges with no double-apply and no lost transaction — which is exactly
+why `eventId` is propagated to the Account Service.
+
+**Trade-offs accepted:** no audit of failed/attempted submissions, `GET /events`
+does not surface `PENDING` events during an outage, and the async-fallback bonus
+(queue-when-down) would need a separate outbox rather than reusing the events
+table. None of these are required by the brief. Under this design the `status`
+column is effectively always `APPLIED`; it is kept as low-cost headroom.
