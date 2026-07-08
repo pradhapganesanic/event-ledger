@@ -18,6 +18,7 @@ import os
 import httpx
 
 from .logging_config import SERVICE_NAME
+from .otel import instrument_httpx_client
 from .resiliency import CircuitOpenError, get_breaker
 from .tracing import TRACE_HEADER, get_trace_id
 
@@ -57,14 +58,16 @@ def _guarded(fn):
 def get_client() -> httpx.Client:
     global _client
     if _client is None:
-        _client = httpx.Client(base_url=ACCOUNT_SERVICE_URL, timeout=TIMEOUT_SECONDS)
+        _client = instrument_httpx_client(
+            httpx.Client(base_url=ACCOUNT_SERVICE_URL, timeout=TIMEOUT_SECONDS)
+        )
     return _client
 
 
 def set_client(client: httpx.Client | None) -> None:
     """Override the client (tests). Pass None via reset_client() to restore."""
     global _client
-    _client = client
+    _client = instrument_httpx_client(client) if client is not None else None
 
 
 def reset_client() -> None:

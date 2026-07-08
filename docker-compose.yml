@@ -9,8 +9,12 @@ services:
       - "8001"
     environment:
       - DATABASE_URL=sqlite:////data/account.db
+      # Export traces to Jaeger via OTLP. Omit this var to disable exporting.
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4317
     volumes:
       - account-data:/data
+    depends_on:
+      - jaeger
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]
       interval: 5s
@@ -27,18 +31,31 @@ services:
       # The Gateway calls the Account Service at this URL. Inside the compose
       # network the hostname is the service name.
       - ACCOUNT_SERVICE_URL=http://account-service:8001
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4317
     volumes:
       - gateway-data:/data
     depends_on:
       # Wait until the Account Service is actually healthy, not just started.
       account-service:
         condition: service_healthy
+      jaeger:
+        condition: service_started
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 5s
       timeout: 3s
       retries: 5
       start_period: 5s
+
+  # Jaeger all-in-one: OTLP ingest + in-memory trace storage + UI, one container.
+  # No separate OTel Collector needed for a single trace backend.
+  jaeger:
+    image: jaegertracing/all-in-one:1.62.0
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    ports:
+      - "16686:16686"   # Jaeger UI  → http://localhost:16686
+      - "4317:4317"     # OTLP gRPC receiver
 
 volumes:
   account-data:

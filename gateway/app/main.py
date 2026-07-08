@@ -24,7 +24,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from . import account_client, metrics
+from . import account_client, metrics, otel
 from .account_client import AccountServiceUnavailable
 from .database import get_db, init_db
 from .logging_config import SERVICE_NAME, configure_logging
@@ -44,6 +44,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Event Gateway", lifespan=lifespan)
+otel.setup_tracing(app)
 metrics.install(app)
 
 

@@ -104,6 +104,8 @@ docker compose up --build
 - Gateway → http://localhost:8000  (docs at `/docs`)
 - Account Service — **internal only** under compose (not published to the host);
   the Gateway reaches it in-network at `http://account-service:8001`.
+- Jaeger UI → http://localhost:16686  (submit an event, then view the
+  Gateway → Account Service trace waterfall)
 
 ## Run — locally without Docker
 
@@ -172,6 +174,10 @@ Coverage:
 - **Resiliency (circuit breaker)** — repeated failures trip the breaker OPEN and
   the Gateway stops calling the Account Service (asserted via a call counter);
   plus unit tests for OPEN → HALF_OPEN recovery, re-open on trial failure, reset.
+- **Distributed tracing (OpenTelemetry)** — Gateway emits a SERVER span plus a
+  CLIENT span for the account call in one trace and propagates `traceparent`;
+  the Account Service continues an incoming trace. Captured via an in-memory
+  span exporter — no Collector/Jaeger needed for tests.
 - **Integration** — full Gateway → Account Service flow over real HTTP: apply,
   trace ID present, balance proxy, idempotent resubmit, out-of-order + debit.
 
@@ -212,6 +218,18 @@ cd gateway         && pytest --cov=app --cov-branch --cov-report=term-missing --
   - **custom domain counter** — `gateway_events_total{outcome}` (stored |
     duplicate | rejected | failed) and `account_transactions_total{outcome}`
     (applied | duplicate)
+- **Distributed tracing (OpenTelemetry)** — both services are auto-instrumented
+  with OpenTelemetry. Each request becomes a **SERVER span**; the Gateway's
+  Account Service call becomes a **CLIENT span** and propagates a W3C
+  `traceparent`, so the Account Service **continues the same trace**. Spans
+  export via **OTLP** to **Jaeger all-in-one** when
+  `OTEL_EXPORTER_OTLP_ENDPOINT` is set (it is, under Docker Compose). Export is
+  asynchronous (BatchSpanProcessor) so it adds no request latency. This runs
+  alongside the lightweight `X-Trace-Id` header used for log correlation.
+  - View traces in the **Jaeger UI → http://localhost:16686** (search service
+    `event-gateway`, open a trace to see the Gateway → Account waterfall).
+  - No separate OTel Collector — Jaeger all-in-one ingests OTLP directly (one
+    trace backend, so the Collector's routing/fan-out isn't needed).
 - **Structured logging** — JSON logs (`timestamp`, `level`, `service`,
   `traceId`, `logger`, `message`) on stdout for both services. The `traceId` is
   the propagated trace ID, so logs from a single request correlate across both
@@ -280,11 +298,14 @@ Done — all functional requirements:
 - ✅ **Resiliency** — circuit breaker on the Account Service call, with a test
   that trips it and asserts it stops calling the service
 - ✅ **Integration + trace-propagation + resiliency tests** across both services
+- ✅ **OpenTelemetry + Jaeger** — OTLP spans exported to Jaeger all-in-one for
+  trace visualization (see Observability)
 
 Remaining (optional bonuses):
 
-- OTel Collector + Jaeger for trace visualization, rate limiting, and async
-  fallback (queue events locally when the Account Service is down).
+- OTel Collector (multi-signal routing) if metrics/logs also move to OTLP, rate
+  limiting on the Gateway, and async fallback (queue events locally when the
+  Account Service is down).
 
 ### Design decision — `POST /events` is "call-first, no orphan rows"
 
