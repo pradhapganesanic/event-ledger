@@ -16,8 +16,8 @@ services:
       - "8000:8000"
     environment:
       - DATABASE_URL=sqlite:////data/gateway.db
-      # Consumed in Phase 2 when the Gateway calls the Account Service.
-      # Inside the compose network the hostname is the service name.
+      # The Gateway calls the Account Service at this URL. Inside the compose
+      # network the hostname is the service name.
       - ACCOUNT_SERVICE_URL=http://account-service:8001
     volumes:
       - gateway-data:/data

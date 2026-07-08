@@ -5,11 +5,12 @@ with **Python / FastAPI**. Each service is an independently runnable process
 with its **own embedded SQLite database** — they share no database or in-process
 state and communicate only over REST.
 
-> **Build status — Phase 1 (current):** each service is fully built and tested
-> in isolation (own DB, tables, endpoints, per-service unit tests).
-> **Phase 2 (planned):** the cross-service concerns — the Gateway → Account
-> Service apply call, trace-ID propagation, a resiliency pattern, graceful
-> degradation, and an end-to-end integration test. See [Roadmap](#roadmap).
+> **Build status:** both services are built and tested. The Gateway → Account
+> Service apply call, distributed tracing (trace-ID propagation + logging in both
+> services), the Gateway balance proxy, graceful degradation, and an end-to-end
+> integration test are **done**. The one remaining item is a dedicated
+> **resiliency pattern** (circuit breaker / retry-with-backoff) beyond the
+> request timeout already in place — see [Roadmap](#roadmap).
 
 ---
 
@@ -22,9 +23,9 @@ Client ──▶ Event Gateway (:8000, public)  ──REST──▶  Account Ser
 ```
 
 - **Event Gateway** — entry point for clients. Validates input, enforces
-  idempotency, and stores the full event in its own DB. It is authoritative for
-  "what was submitted." (In Phase 2 it also calls the Account Service to apply
-  the transaction.)
+  idempotency, calls the Account Service to apply the transaction, and stores the
+  full event in its own DB. It is authoritative for "what was submitted" and
+  proxies balance queries to the Account Service.
 - **Account Service** — internal, not exposed to clients. Owns the ledger:
   stores applied transactions and computes balance = Σ CREDIT − Σ DEBIT. It is
   authoritative for "what actually landed in the account."
@@ -43,6 +44,7 @@ across a service boundary each service must be self-sufficient.
 | `POST` | `/events` | Submit a transaction event |
 | `GET` | `/events/{id}` | Retrieve a single event |
 | `GET` | `/events?account={id}` | List an account's events, ordered by `eventTimestamp` |
+| `GET` | `/accounts/{id}/balance` | Balance proxy → Account Service (`503` if it is down) |
 | `GET` | `/health` | Health + DB connectivity |
 
 **Account Service (internal)**
@@ -66,6 +68,13 @@ across a service boundary each service must be self-sufficient.
   (not arrival order); balance is a sum, so it is correct regardless of order.
 - **Validation** — missing fields, non-positive amounts, and unknown types are
   rejected. The Gateway returns `400` with clear messages.
+- **Distributed tracing** — the Gateway generates a trace ID per request (or
+  honours an inbound `X-Trace-Id`), propagates it to the Account Service via
+  header, and both services log it. It is also echoed on responses. A single
+  request produces one traceable path across both services.
+- **Graceful degradation** — when the Account Service is unreachable,
+  `POST /events` and balance queries return a clear `503`; event reads
+  (`GET /events/{id}`, `GET /events?account=`) keep working from local data.
 
 ---
 
@@ -125,22 +134,51 @@ curl http://localhost:8001/accounts/acct-123/balance
 
 ## Tests
 
-Each service has its own suite. From a venv with dev deps installed:
+Three suites: one per service (unit) plus an end-to-end integration suite. From
+a venv with dev deps installed:
 
 ```bash
-# Account Service
-cd account-service
-pip install -r requirements-dev.txt
-pytest
+# Account Service (unit)
+cd account-service && pip install -r requirements-dev.txt && pytest
 
-# Event Gateway
-cd gateway
-pip install -r requirements-dev.txt
-pytest
+# Event Gateway (unit) — uses a FakeAccount stand-in for the Account Service
+cd gateway && pip install -r requirements-dev.txt && pytest
+
+# End-to-end integration — starts BOTH real services as subprocesses over HTTP
+cd <repo-root> && pytest integration
 ```
 
-Covered in Phase 1: idempotency, out-of-order listing/balance, validation,
-health, and metrics — for each service in isolation.
+Coverage:
+
+- **Core** — idempotency, out-of-order listing/balance, validation, health
+  (both services in isolation).
+- **Trace propagation** — the Gateway generates a trace ID and propagates the
+  same ID to the Account Service; the Account Service echoes an inbound ID.
+- **Graceful degradation** — Account Service down → `POST /events` and balance
+  queries return `503` (and no orphan event is stored); event reads still work.
+- **Balance proxy** — returns balance, `404` for unknown accounts, `503` when
+  the Account Service is down.
+- **Integration** — full Gateway → Account Service flow over real HTTP: apply,
+  trace ID present, balance proxy, idempotent resubmit, out-of-order + debit.
+
+### Continuous integration
+
+`.github/workflows/ci.yml` runs on every pull request and on pushes to the
+default branch:
+
+- **`unit-tests`** — runs each service's suite with a coverage gate:
+  `pytest --cov=app --cov-fail-under=90`. The build **fails if coverage drops
+  below 90%**, so a PR cannot merge under the threshold. Current coverage:
+  Account ~94%, Gateway ~95%.
+- **`integration-tests`** — starts both real services and runs the `integration`
+  suite over HTTP.
+
+Reproduce the coverage gate locally:
+
+```bash
+cd account-service && pytest --cov=app --cov-report=term-missing --cov-fail-under=90
+cd gateway         && pytest --cov=app --cov-report=term-missing --cov-fail-under=90
+```
 
 ---
 
@@ -155,11 +193,13 @@ Elasticsearch / an OTel log processor) derive request and error counts
 downstream, without the services counting anything themselves.
 
 - **Structured logging** — JSON logs (`timestamp`, `level`, `service`,
-  `logger`, `message`) on stdout for both services.
+  `traceId`, `logger`, `message`) on stdout for both services. The `traceId` is
+  the propagated trace ID, so logs from a single request correlate across both
+  services.
 - **Outcome events** — every transaction is logged with an `outcome` field:
-  - Gateway: `outcome=stored` | `duplicate` | `rejected`
+  - Gateway: `outcome=stored` | `duplicate` | `rejected` | `failed`
   - Account Service: `outcome=applied` | `duplicate`
-  - (Phase 2 adds `outcome=failed` when the Account Service is unreachable.)
+  - (`failed` is logged by the Gateway when the Account Service is unreachable.)
 - **Health** — `GET /health` reports service status and DB connectivity
   (`503` if the DB is unreachable).
 
@@ -176,26 +216,38 @@ downstream, without the services counting anything themselves.
   distinguishable from empty.
 - **Balance proxy on the Gateway** — the handout lists a balance endpoint only
   on the (internal) Account Service, but external clients can reach it only
-  through the Gateway. A Gateway balance proxy is therefore planned for Phase 2.
+  through the Gateway. The Gateway therefore exposes
+  `GET /accounts/{id}/balance` that proxies to the Account Service (and returns
+  `503` when it is down).
+- **Request timeout** — the Account Service client applies a timeout (default
+  `3s`, `ACCOUNT_TIMEOUT_SECONDS`) so a slow/hung Account Service cannot block
+  the Gateway. This is basic hygiene; a full resiliency pattern (circuit breaker
+  / retry-with-backoff) is the remaining roadmap item.
 
 ---
 
 ## Roadmap
 
-Phase 2 (cross-service concerns, deferred by design):
+Done:
 
-- **Gateway → Account Service apply call** inside `POST /events` — see the
-  chosen contract below
-- **Distributed tracing** — generate a trace ID at the Gateway, propagate via
-  HTTP header, log it in both services
-- **Resiliency** — timeout + retry with backoff and/or a circuit breaker on the
-  Account Service call
-- **Graceful degradation** — `POST /events` returns `503` when the Account
-  Service is down; event reads keep working; balance proxy returns a clear error
-- **Balance proxy** endpoint on the Gateway
-- **Integration + resiliency tests** across both services
+- ✅ **Gateway → Account Service apply call** inside `POST /events` (call-first
+  contract below)
+- ✅ **Distributed tracing** — trace ID generated at the Gateway, propagated via
+  header, logged in both services, echoed on responses
+- ✅ **Graceful degradation** — `POST /events` and balance queries return `503`
+  when the Account Service is down; event reads keep working
+- ✅ **Balance proxy** endpoint on the Gateway
+- ✅ **Integration + trace-propagation tests** across both services
 
-### Phase 2 design decision — `POST /events` is "call-first, no orphan rows"
+Remaining:
+
+- **Resiliency pattern (Req #5)** — a circuit breaker and/or retry-with-backoff
+  on the Account Service call, beyond the request timeout already in place, plus
+  a test that simulates repeated failures and asserts the breaker opens.
+- **Bonus** — OTel Collector + Jaeger for trace visualization, Prometheus
+  metrics, rate limiting, async fallback (queue-when-down).
+
+### Design decision — `POST /events` is "call-first, no orphan rows"
 
 When the Account Service is down, the Gateway **rejects with `503` and stores
 nothing**. It does not persist an unapplied event. This keeps a clean
