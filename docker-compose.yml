@@ -1,0 +1,29 @@
+# Starts both services as independent containers on a shared network.
+# Each service has its OWN in-container SQLite database — they never share one.
+services:
+  account-service:
+    build: ./account-service
+    ports:
+      - "8001:8001"
+    environment:
+      - DATABASE_URL=sqlite:////data/account.db
+    volumes:
+      - account-data:/data
+
+  gateway:
+    build: ./gateway
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=sqlite:////data/gateway.db
+      # Consumed in Phase 2 when the Gateway calls the Account Service.
+      # Inside the compose network the hostname is the service name.
+      - ACCOUNT_SERVICE_URL=http://account-service:8001
+    volumes:
+      - gateway-data:/data
+    depends_on:
+      - account-service
+
+volumes:
+  account-data:
+  gateway-data:
