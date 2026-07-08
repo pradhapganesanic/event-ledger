@@ -1,7 +1,7 @@
 name: CI
 
 # Runs on every pull request (so the coverage gate blocks a merge) and on
-# pushes to the default branch. Coverage must be >= 90% or the job fails.
+# pushes to the default branch. BOTH line and branch coverage must be 100%.
 on:
   pull_request:
     branches: [main, master]
@@ -10,7 +10,7 @@ on:
 
 jobs:
   unit-tests:
-    name: Unit tests + 90% coverage (${{ matrix.service }})
+    name: Unit tests + coverage (${{ matrix.service }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -29,14 +29,30 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt
 
-      - name: Run tests with coverage gate (fail under 90%)
+      - name: Run tests with 100% coverage gate (line + branch)
         working-directory: ${{ matrix.service }}
         run: |
           pytest \
             --cov=app \
+            --cov-branch \
             --cov-report=term-missing \
             --cov-report=xml \
-            --cov-fail-under=90
+            --cov-report=json \
+            --cov-fail-under=100
+
+      - name: Report line and branch coverage separately
+        working-directory: ${{ matrix.service }}
+        run: |
+          python - <<'PY'
+          import json, sys
+          t = json.load(open("coverage.json"))["totals"]
+          line = 100.0 if not t["num_statements"] else 100 * t["covered_lines"] / t["num_statements"]
+          branch = 100.0 if not t["num_branches"] else 100 * t["covered_branches"] / t["num_branches"]
+          print(f"Line coverage:   {line:.2f}%")
+          print(f"Branch coverage: {branch:.2f}%")
+          if line < 100.0 or branch < 100.0:
+              sys.exit("coverage below 100%")
+          PY
 
       - name: Upload coverage report
         if: always()

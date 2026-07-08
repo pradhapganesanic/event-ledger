@@ -180,18 +180,23 @@ Coverage:
 `.github/workflows/ci.yml` runs on every pull request and on pushes to the
 default branch:
 
-- **`unit-tests`** — runs each service's suite with a coverage gate:
-  `pytest --cov=app --cov-fail-under=90`. The build **fails if coverage drops
-  below 90%**, so a PR cannot merge under the threshold. Current coverage:
-  Account ~94%, Gateway ~95%.
+- **`unit-tests`** — runs each service's suite with a **100% coverage gate**
+  (`--cov-branch --cov-fail-under=100`). The build **fails if either line or
+  branch coverage drops below 100%**, so a PR cannot merge under the threshold.
+  CI reports the two figures on separate lines:
+
+  ```
+  Line coverage:   100.00%
+  Branch coverage: 100.00%
+  ```
 - **`integration-tests`** — starts both real services and runs the `integration`
   suite over HTTP.
 
-Reproduce the coverage gate locally:
+Reproduce the coverage gate locally (line + branch, must be 100%):
 
 ```bash
-cd account-service && pytest --cov=app --cov-report=term-missing --cov-fail-under=90
-cd gateway         && pytest --cov=app --cov-report=term-missing --cov-fail-under=90
+cd account-service && pytest --cov=app --cov-branch --cov-report=term-missing --cov-fail-under=100
+cd gateway         && pytest --cov=app --cov-branch --cov-report=term-missing --cov-fail-under=100
 ```
 
 ---
